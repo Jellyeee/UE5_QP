@@ -226,11 +226,8 @@ private:
 	UPROPERTY(Replicated) // [Network] 절대 조준 Yaw 값 (For Stable IK)
 	float NetAimYaw; 
 
-	UPROPERTY()
-	class AWorldItemActor* OverlappingWorldItem = nullptr; //겹쳐진 월드 아이템 액터
-
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Inventory", meta = (AllowPrivateAccess = "true"))
-	TObjectPtr<class UInventoryComponent> InventoryComponent; //인벤토리 컴포넌트
+	UPROPERTY(Replicated) // [Network] 절대 조준 Yaw 값 (For Stable IK)
+	float NetAimYaw; 
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Inventory", meta = (AllowPrivateAccess = "true"))
 	float EquipHoldThreshhold = 0.30f; //E를 이 시간 이상 누르면 인벤토리 저장

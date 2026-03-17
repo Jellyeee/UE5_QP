@@ -157,18 +157,11 @@ void AQPCharacter::DropInventoryItemAt(const FIntPoint& Cell)
 		return; //무기 드랍 후 함수 종료
 	}
 
-	// 일반 아이템이면 WorldItemActor로 드랍
-	FActorSpawnParameters SpawnParams;
-	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn; //충돌 처리 방법 설정
+	SetNetUpdateFrequency(100.f); // [Network] 업데이트 빈도 상향 (66 -> 100)
+	SetMinNetUpdateFrequency(66.f); // [Network] 최소 빈도 상향 (33 -> 66)
 
-	AWorldItemActor* Dropped = GetWorld()->SpawnActor<AWorldItemActor>(AWorldItemActor::StaticClass(), DropLoc, FRotator::ZeroRotator, SpawnParams); //월드 아이템 액터 스폰
-	if (Dropped)
-	{
-		Dropped->ItemData = ItemData; //아이템 데이터 설정
-		Dropped->Quantity = Quantity; //수량 설정
-	}
-
-	InventoryComponent->RemoveItemAt(Slot.Position); //인벤토리에서 아이템 제거
+	// [Network] 먼 거리에서도 애니메이션 생략 없이 갱신 (부드러운 동작 보장)
+	GetMesh()->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
 }
 
 void AQPCharacter::BeginPlay()
@@ -657,35 +650,44 @@ void AQPCharacter::OnEquipHoldTriggered()
 void AQPCharacter::TryEquipWeapon() {
 	if (!CombatComponent) return; 
 
-	if (OverlappingWeapon)
-	{
-		CombatComponent->EquipWeapon(OverlappingWeapon, true); //겹쳐진 무기 장착 시도
-
-		OverlappingWeapon = nullptr; //겹쳐진 무기 초기화
-		RefreshPickupCandidate(nullptr); //픽업 후보 갱신
-		return; //함수 종료
-	}
-
-	if (OverlappingWorldItem && InventoryComponent) //월드 아이템이 겹쳐져 있고 인벤토리 컴포넌트가 있으면
-	{
-		UItemDataAsset* ItemData = OverlappingWorldItem->ItemData; //겹쳐진 월드 아이템의 아이템 데이터 가져오기
-		const int32 Quantity = OverlappingWorldItem->Quantity; //겹쳐진 월드 아이템의 수량 가져오기
-
-		if (ItemData && Quantity > 0) //아이템 데이터가 유효하고 수량이 0보다 크면
-		{
-			const bool bAdded = InventoryComponent->AddItem(ItemData, Quantity); //아이템 인벤토리에 추가 시도
-			if (bAdded)
+			if (Pitch < 0.f)  // 아래를 볼 때는 Pivot 상승 + 카메라 숙임 + 줌인 적용
 			{
-				AWorldItemActor* Picked = OverlappingWorldItem; //픽업한 월드 아이템 저장
-				OverlappingWorldItem = nullptr; //겹쳐진 월드 아이템 초기화
-				UpdatePickupWidgetTarget(); //픽업 위젯 타겟 업데이트
+				float AbsPitch = FMath::Abs(Pitch);
 
-				if (Picked)
+				// Pitch가 0에서 -90 사이일 때, Pivot을 최대 150cm까지 상승시키고, 카메라를 최대 35도까지 숙이며, 카메라 거리를 최대 100cm까지 줌인
+				float AddedHeight = FMath::GetMappedRangeValueClamped(FVector2D(0.f, 90.f), FVector2D(0.f, 150.f), AbsPitch);
+				TargetOffset.Z = AddedHeight;
+
+				// Pitch가 0에서 -90 사이일 때, 카메라를 최대 35도까지 숙이며, 카메라 거리를 최대 100cm까지 줌인
+				float AddedPitch = FMath::GetMappedRangeValueClamped(FVector2D(0.f, 90.f), FVector2D(0.f, -35.f), AbsPitch);
+				TargetRelRot.Pitch = AddedPitch;
+				TargetOffset.X = 0.f;
+
+				// Pitch가 0에서 -90 사이일 때, 카메라 거리를 최대 100cm까지 줌인
+				TargetArmLength = FMath::GetMappedRangeValueClamped(FVector2D(0.f, 90.f), FVector2D(BaseArmLength, BaseArmLength - 100.f), AbsPitch);
+			}
+		}
+		else // 총이 아닐 때는 기존 로직 유지 (Pitch에 따른 동적 줌)
+		{
+			if (IsAiming()) // 조준 중일 때는 Pitch에 따른 줌 대신 고정된 AimingArmLength 사용
+			{
+				TargetArmLength = AimingArmLength; 
+			}
+			else // 조준하지 않을 때는 Pitch에 따라 동적으로 줌인/줌아웃 적용
+			{
+				FRotator ControlRot = GetControlRotation();
+				float Pitch = ControlRot.Pitch;
+				if (Pitch > 180.f) // UE4의 Pitch는 0 ~ 360 범위이므로, -180 ~ 180 범위로 정규화
+					Pitch -= 360.f;
+
+				if (Pitch < 0.f) // 아래를 볼 때는 줌인 (카메라와 캐릭터 사이 거리 감소)
 				{
-					Picked->Destroy(); //월드 아이템 액터 파괴
+					TargetArmLength = FMath::GetMappedRangeValueClamped(FVector2D(-90.f, 0.f), FVector2D(MinVerticalArmLength, DefaultArmLength), Pitch);
 				}
-
-				RefreshPickupCandidate(Picked); //픽업 후보 갱신
+				else // 위를 볼 때는 줌아웃 (카메라와 캐릭터 사이 거리 증가)
+				{
+					TargetArmLength = FMath::GetMappedRangeValueClamped(FVector2D(0.f, 90.f), FVector2D(DefaultArmLength, MaxVerticalArmLength), Pitch);
+				}
 			}
 		}
 	}
@@ -704,46 +706,56 @@ void AQPCharacter::TryStorePickupToInventory()
 		const bool bAdded = InventoryComponent->AddItem(WeaponItemData, 1); //인벤토리에 무기 아이템 추가 시도
 		if (bAdded)
 		{
-			AWeaponBase* PickedWeapon = OverlappingWeapon; //픽업한 무기 저장
-
-			OverlappingWeapon = nullptr; //겹쳐진 무기 초기화
-			UpdatePickupWidgetTarget(); //픽업 위젯 타겟 업데이트
-
-			if (PickedWeapon)
-			{
-				PickedWeapon->Destroy(); //무기 액터 파괴
-			}
-
-			RefreshPickupCandidate(PickedWeapon); //픽업 후보 갱신
+			FRotator NewRelRot = FMath::RInterpTo(FollowCamera->GetRelativeRotation(), TargetRelRot, DeltaTime, CrouchCameraInterpSpeed);
+			FollowCamera->SetRelativeRotation(NewRelRot);
 		}
-		return;
-	}
 
-	// 월드 아이템: 인벤토리 추가
-	if (OverlappingWorldItem)
+		const float NewArmLength = FMath::FInterpTo(CameraBoom->TargetArmLength, TargetArmLength, DeltaTime, CrouchCameraInterpSpeed); // 카메라 거리 보간
+		CameraBoom->TargetArmLength = NewArmLength; // 카메라 거리 업데이트
+	} 
+
+	// 회전 모드 전환 로직 (Locally Controlled 또는 Authority인 경우에만 실행)
+	if (IsLocallyControlled() || HasAuthority())
 	{
-		UItemDataAsset* ItemData = OverlappingWorldItem->ItemData; //겹쳐진 월드 아이템의 아이템 데이터 가져오기
-		const int32 Quantity = OverlappingWorldItem->Quantity; //겹쳐진 월드 아이템의 수량 가져오기
+		float Speed = GetVelocity().Size2D();
+		UCharacterMovementComponent* MoveComponent = GetCharacterMovement();
 
-		if (ItemData && Quantity > 0)
+		if (MoveComponent)
 		{
-			const bool bAdded = InventoryComponent->AddItem(ItemData, Quantity); //아이템 인벤토리에 추가 시도
-			if (bAdded)
+			// 이동 중(Speed >= 5.0f): 무기를 들고 있으면 Strafe, 아니면 Normal
+			if (Speed >= 5.0f)
 			{
-				AWorldItemActor* Picked = OverlappingWorldItem; //픽업한 월드 아이템 저장
+				bool bIsHoldingGun = (Weapontype == EQPWeaponType::EWT_Rifle || Weapontype == EQPWeaponType::EWT_Shotgun || Weapontype == EQPWeaponType::EWT_Handgun);
 
-				OverlappingWorldItem = nullptr; //겹쳐진 월드 아이템 초기화
-				UpdatePickupWidgetTarget(); //픽업 위젯 타겟 업데이트
-
-				if (Picked)
+				if (IsAiming())
 				{
-					Picked->Destroy(); //월드 아이템 액터 파괴
+					// 조준 시에는 즉각적인 반응을 위해 Controller Rotation 사용 (Crisp)
+					bUseControllerRotationYaw = true;
+					MoveComponent->bOrientRotationToMovement = false;
 				}
-
-				RefreshPickupCandidate(Picked); //픽업 후보 갱신
+				else if (bIsHoldingGun && !IsSprinting())
+				{
+					// 무기를 들고 있고 달리지 않을 때 (이동 방향과 상관없이 캐릭터가 바라보는 방향 유지)
+					bUseControllerRotationYaw = false;
+					MoveComponent->bOrientRotationToMovement = false;
+				}
+				else
+				{
+					//무기를 들고 있지 않거나 달릴 때
+					bUseControllerRotationYaw = false;
+					MoveComponent->bOrientRotationToMovement = true;
+				}
+			}
+			// 정지 상태(Speed < 5.0f): Turn In Place를 위해 Controller Rotation 해제
+			else
+			{
+				bUseControllerRotationYaw = false;
+				MoveComponent->bOrientRotationToMovement = false;
 			}
 		}
 	}
+
+	AimOffset(DeltaTime); //회전 차이 계산
 }
 void AQPCharacter::AttackPressed()
 {
@@ -1201,68 +1213,247 @@ void AQPCharacter::HandleDeathCameraInput(FVector MoveDirection, float Value)
 
 void AQPCharacter::UpdatePickupWidgetTarget()
 {
-	if (!IsLocallyControlled()) return; //로컬 컨트롤러가 아니면 함수 종료
-	if (OverlappingWeapon && !IsValid(OverlappingWeapon))
+	if (!CombatComponent) return;
+	if (OverlappingWeapon) //겹쳐진 무기가 있으면
 	{
-		OverlappingWeapon = nullptr; //유효하지 않으면 초기화
+		// [Multiplayer] 서버에 장착 요청 (RPC)
+		CombatComponent->ServerEquipWeapon(OverlappingWeapon);
+		
+		OverlappingWeapon = nullptr; //겹쳐진 무기 초기화
+		SetOverlappingWeapon(nullptr); //겹쳐진 무기 설정 함수 호출
 	}
-	if (OverlappingWorldItem && !IsValid(OverlappingWorldItem))
+}
+void AQPCharacter::AttackPressed()
+{
+	if (CombatComponent) CombatComponent->StartAttack(); //공격 시작
+}
+void AQPCharacter::AttackReleased()
+{
+	if (CombatComponent) CombatComponent->StopAttack(); //공격 멈춤
+}
+
+//조준 버튼을 눌렀을 때 호출
+void AQPCharacter::AimButtonPressed()
+{
+	if (!CombatComponent) return; 
+
+	CombatComponent->SetAiming(true); 
+	UpdateMovementSpeed(); 
+	
+	if (CameraBoom) CameraBoom->bEnableCameraLag = false;
+}
+
+//조준 버튼에서 손을 뗐을 때 호출
+void AQPCharacter::AimButtonReleased()
+{
+	if (!CombatComponent) return; 
+
+	CombatComponent->SetAiming(false); 
+	UpdateMovementSpeed(); 
+
+	// 조준 해제 시 카메라 랙 다시 활성화
+	if (CameraBoom) CameraBoom->bEnableCameraLag = true;
+}
+
+//현재 조준 중인지 여부를 외부에서 확인
+bool AQPCharacter::IsAiming() const
+{
+	return CombatComponent && CombatComponent->IsAiming(); //전투 컴포넌트가 유효하고 조준 중인지 반환
+}
+
+// 네트워크 복제 설정
+void AQPCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME(AQPCharacter, OverlappingWeapon);
+	DOREPLIFETIME(AQPCharacter, bWantsToSprint);
+	DOREPLIFETIME(AQPCharacter, bIsTurningInPlace);
+	DOREPLIFETIME(AQPCharacter, bIsTurningInPlace);
+	DOREPLIFETIME(AQPCharacter, NetAimYaw);
+}
+
+bool AQPCharacter::IsSprinting() const
+{
+	// 달리기 조건: 달리기 버튼이 눌려 있고, 조준 중이 아니며, 앞으로 이동 입력이 있는 경우
+	if (!bWantsToSprint || IsAiming()) return false;
+
+	if (!IsLocallyControlled()) // 서버와 다른 클라이언트는 실제 이동 속도로 판단
 	{
-		OverlappingWorldItem = nullptr; //유효하지 않으면 초기화
+		if (GetVelocity().SizeSquared2D() < 10.f) return false; // 10.f는 약간의 오차 범위 (1cm/s 이상)
+
+		float Dot = FVector::DotProduct(GetVelocity().GetSafeNormal2D(), GetActorForwardVector()); // Dot이 0.1f 이상이면 대략 84도 이내로 전방 이동으로 간주 (약간의 횡이동 허용)
+		return Dot > 0.1f; // 0.1f: 약간의 횡이동 허용
 	}
 
-	AActor* NewTarget = nullptr; //새로운 타겟 액터 초기화
-	if (OverlappingWeapon) NewTarget = OverlappingWeapon; //겹쳐진 무기가 있으면 무기 설정
-	else if (OverlappingWorldItem) NewTarget = OverlappingWorldItem; //겹쳐진 월드 아이템이 있으면 월드 아이템 설정
-
-	if (AQPPlayerController* PlayerController = Cast<AQPPlayerController>(GetController())) //플레이어 컨트롤러로 캐스팅 시도
-	{
-		PlayerController->SetPickupTarget(NewTarget); //픽업 타겟 설정
-	}
+	return MoveInputVector.X > 0.f; // 앞으로 이동 입력이 있는 경우에만 달리기로 간주 (후진은 달리기 아님)
 }
 
 void AQPCharacter::RefreshPickupCandidate(const AActor* ActorToIgnore)
 {
-	TArray<AActor*> Overlaps; //겹쳐진 액터 배열
-	GetOverlappingActors(Overlaps); //겹쳐진 액터들 가져오기
+	FRotator AimRotation = FRotator::ZeroRotator; // AimRotation 선언을 함수 시작 부분으로 이동
 
-	AWeaponBase* BestWeapon = nullptr; //최적의 무기 초기화
-	AWorldItemActor* BestWorldItem = nullptr; //최적의 월드 아이템 초기화
-
-	float BestWeaponDistSq = TNumericLimits<float>::Max(); //최적의 무기 거리 제곱 초기화
-	float BestWorldDistSq = TNumericLimits<float>::Max(); //최적의 월드 아이템 거리 제곱 초기화
-
-	const AWeaponBase* Equipped = CombatComponent ? CombatComponent->GetEquippedWeapon() : nullptr; //장착된 무기 가져오기
-	const FVector MyLoc = GetActorLocation(); //자신의 위치 가져오기
-
-	for (AActor* actors : Overlaps) //겹쳐진 액터들 순회
+	// 1. 기본 회전값 획득 ( Pitch: Up(-), Down(+) )
+	if (Controller)
 	{
-		if (!IsValid(actors) || actors == this) continue; //유효하지 않거나 자기 자신이면 건너뜀
-		if (ActorToIgnore && actors == ActorToIgnore) continue; //무시할 액터이면 건너뜀
+		AimRotation = Controller->GetControlRotation();
+	}
+	else
+	{
+		AimRotation = GetBaseAimRotation();
+	}
+	
+	// [Network] NetAimYaw 업데이트 (Server/Local)
+	if (HasAuthority() || IsLocallyControlled())
+	{
+		NetAimYaw = AimRotation.Yaw;
+	}
 
-		if (AWeaponBase* weapons = Cast<AWeaponBase>(actors)) //무기 액터로 캐스팅 시도
-		{
-			if (Equipped && weapons == Equipped) continue; //이미 장착된 무기이면 건너뜀
+	AimRotation.Pitch = FRotator::NormalizeAxis(AimRotation.Pitch); // Pitch 정규화 (0 ~ 360 -> -180 ~ 180)
 
-			const float DistSq = FVector::DistSquared(weapons->GetActorLocation(), MyLoc); //무기와 자신의 거리 제곱 계산
-			if (DistSq < BestWeaponDistSq) //최적의 무기 거리 제곱보다 작으면
-			{
-				BestWeaponDistSq = DistSq; //최적의 무기 거리 제곱 업데이트
-				BestWeapon = weapons; //최적의 무기 업데이트
-			}
-		}
-		else if (AWorldItemActor* worlditems = Cast<AWorldItemActor>(actors)) //월드 아이템 액터로 캐스팅 시도
+	// Simulated Proxy도 AO 계산을 직접 수행 
+	if (GetLocalRole() == ROLE_SimulatedProxy)
+	{
+		float TargetPitch = FRotator::NormalizeAxis(AimRotation.Pitch); // SimProxy도 Pitch 정규화
+		AO_Pitch = FMath::FInterpTo(AO_Pitch, TargetPitch, DeltaTime, 20.f);  
+		AimRotation.Yaw = NetAimYaw;
+	}
+	else // Local/Server는 기존 로직 유지 (즉시 반영)
+	{
+		float Pitch = FRotator::NormalizeAxis(AimRotation.Pitch);
+		AO_Pitch = FMath::Clamp(Pitch, -90.f, 90.f);
+	}
+
+	// 2. HitTarget 기반 보정 (Yaw Only)
+	if (CombatComponent && !CombatComponent->HitTarget.IsZero())
+	{
+		FVector Start = GetActorLocation();
+
+		// 근접 거리 체크 (2m 이상 거리에서만 LookAt 적용)
+		if (FVector::Dist(Start, CombatComponent->HitTarget) > 200.f)
 		{
-			const float DistSq = FVector::DistSquared(worlditems->GetActorLocation(), MyLoc); //월드 아이템과 자신의 거리 제곱 계산
-			if (DistSq < BestWorldDistSq) //최적의 월드 아이템 거리 제곱보다 작으면
+			if (IsAiming()) // 조준 중일 때만 LookAt 적용 (비조준 시에는 기존 회전 유지)
 			{
-				BestWorldDistSq = DistSq; //최적의 월드 아이템 거리 제곱 업데이트
-				BestWorldItem = worlditems; //최적의 월드 아이템 업데이트
+				FRotator LookAtRotation = UKismetMathLibrary::FindLookAtRotation(Start, CombatComponent->HitTarget); // HitTarget을 향하는 회전 계산
+				AimRotation.Yaw = LookAtRotation.Yaw; // Yaw만 적용하여 AimRotation 보정
 			}
 		}
 	}
-	OverlappingWeapon = BestWeapon; //겹쳐진 무기 설정
-	OverlappingWorldItem = (BestWeapon ? nullptr : BestWorldItem); //겹쳐진 월드 아이템 설정 (무기가 있으면 무시)
+
+	// 3. Yaw 계산
+	const float AimYaw = AimRotation.Yaw;
+	const float ActorYaw = GetActorRotation().Yaw;
+
+	const float DeltaYaw = UKismetMathLibrary::NormalizedDeltaRotator(
+		FRotator(0.f, AimYaw, 0.f),
+		FRotator(0.f, ActorYaw, 0.f)
+	).Yaw;
+
+	// Simulated Proxy는 부드러운 보간 적용, Local/Server는 즉시 반영 (회전 애니메이션이 어색하게 보이는 것을 방지)
+	if (GetLocalRole() == ROLE_SimulatedProxy)
+	{
+		float TargetYaw = FMath::Clamp(DeltaYaw, -90.f, 90.f);
+		AO_Yaw = FMath::FInterpTo(AO_Yaw, TargetYaw, DeltaTime, 5.f); // 10.f -> 5.f (Micro-Jitter Fix)
+	}
+	else
+	{
+		AO_Yaw = FMath::Clamp(DeltaYaw, -90.f, 90.f);
+	}
+
+	// 이동 중인지 확인
+	const float Speed = GetVelocity().Size2D();
+	bool bIsAttacking = false;
+	if (CombatComponent) bIsAttacking = CombatComponent->IsAttacking();
+
+	const float DeltaYawAbs = FMath::Abs(DeltaYaw); 
+
+	{
+		if (Speed > 1.f) // 이동 중이라면 (1.f는 오차 범위)
+		{
+			bIsTurningInPlace = false;
+
+			const FRotator TargetRotation = FRotator(0.f, AimYaw, 0.f); // 이동 중에는 항상 AimYaw를 향하도록 회전 (달리기 중에도 적용)
+			
+
+			if (GetLocalRole() != ROLE_SimulatedProxy)  // Simulated Proxy는 제자리 회전 로직에서 제외 (회전 애니메이션이 어색하게 보이는 것을 방지)
+			{
+				if (!bUseControllerRotationYaw) // Controller Rotation이 비활성화된 경우에만 회전 로직 적용 (달리기 중에는 Controller Rotation이 활성화되어 있으므로 회전 로직 적용 제외)
+				{
+					if (IsAiming()) // 조준 중일 때만 즉시 회전 (공격 중 강제 회전 제거)
+					{
+						SetActorRotation(TargetRotation);
+					}
+					else // 이동 중이지만 조준하지 않을 때는 부드럽게 회전
+					{
+						// 몽타주 재생 여부 확인
+						bool bIsMontagePlaying = false;
+						if (GetMesh() && GetMesh()->GetAnimInstance())
+						{
+							if (CombatComponent && CombatComponent->GetEquippedWeapon())
+							{
+								UAnimMontage* FireMontage = CombatComponent->GetEquippedWeapon()->GetFireMontage();
+								if (GetMesh()->GetAnimInstance()->Montage_IsPlaying(FireMontage))
+								{
+									bIsMontagePlaying = true;
+								}
+							}
+						}
+
+						float InterpSpeed = 15.f;
+						if (bIsAttacking || bIsMontagePlaying) InterpSpeed = 50.f; // [Fix] 공격 중에는 빠르게 회전하여 상체 비틀림 방지
+
+						const FRotator NewRotation = FMath::RInterpTo(GetActorRotation(), TargetRotation, DeltaTime, InterpSpeed); // 이동 중이지만 조준하지 않을 때는 부드럽게 회전 (공격 중 강제 회전 제거)
+						SetActorRotation(NewRotation);
+
+						// 회전 후의 Yaw로 AO_Yaw 계산 
+						const float NewActorYaw = NewRotation.Yaw;
+						const float NewDeltaYaw = UKismetMathLibrary::NormalizedDeltaRotator(FRotator(0.f, AimYaw, 0.f), FRotator(0.f, NewActorYaw, 0.f)).Yaw;
+						AO_Yaw = FMath::Clamp(NewDeltaYaw, -90.f, 90.f);
+					}
+				}
+			}
+		}
+		else // 거의 정지 상태라면 제자리 회전 로직 적용
+		{
+			
+			float TurnThreshold = 60.f; 
+			if (bIsAttacking) TurnThreshold = 0.f; // [Fix] 공격 중에는 즉시 회전하여 상체 비틀림 방지
+
+			if (DeltaYawAbs > TurnThreshold) // 60도 이상으로 벌어지면 제자리 회전 시작
+			{
+				bIsTurningInPlace = true;
+			}
+			else if (DeltaYawAbs < 5.f) // 5도 미만으로 줄어들면 제자리 회전 종료 (부드러운 종료를 위해 완화)
+			{
+				bIsTurningInPlace = false;
+			}
+
+			if (bIsTurningInPlace) // 제자리 회전 로직 적용
+			{
+				const FRotator TargetRotation = FRotator(0.f, AimYaw, 0.f); 
+
+				float InterpSpeed = 20.f; // 기본 회전 속도
+				if (DeltaYawAbs <= 60.f) // 60도 이하에서는 회전 속도를 점점 빠르게 (잔여 회전이 적을수록 더 빠르게)
+				{
+					InterpSpeed = FMath::GetMappedRangeValueClamped(FVector2D(0.f, 60.f), FVector2D(10.f, 20.f), DeltaYawAbs); // 0도에 가까울수록 20.f에 가깝게, 60도에 가까울수록 10.f에 가깝게 (잔여 회전이 적을수록 더 빠르게)
+				}
+
+				if (GetLocalRole() != ROLE_SimulatedProxy) // Simulated Proxy는 제자리 회전 로직에서 제외 (회전 애니메이션이 어색하게 보이는 것을 방지)
+				{
+					if (DeltaYawAbs < 2.f) // 2도 미만으로 줄어들면 회전을 강제로 맞춰서 제자리 회전 종료 (잔여 회전이 거의 없을 때는 부드러운 종료를 위해 강제 맞춤)
+					{
+						SetActorRotation(TargetRotation);
+						bIsTurningInPlace = false; // 강제 종료
+					}
+					else // 잔여 회전이 아직 있을 때는 부드럽게 회전
+					{
+						const FRotator NewRotation = FMath::RInterpTo(GetActorRotation(), TargetRotation, DeltaTime, InterpSpeed);
+						SetActorRotation(NewRotation);
+					}
+				}
+			}
+		}
+	}
 
 	UpdatePickupWidgetTarget(); //픽업 위젯 타겟 업데이트
 }
@@ -1350,3 +1541,11 @@ void AQPCharacter::MulticastDie_Implementation()
 		GetCharacterMovement()->StopMovementImmediately();
 	}
 }
+
+void AQPCharacter::HandleAimStateChanged(bool bIsAiming)
+{
+	UpdateMovementSpeed(); //조준 상태가 변경되면 즉시 이동 속도 재계산 (애니메이션 연결 문제 테스트 중)
+}
+
+
+
