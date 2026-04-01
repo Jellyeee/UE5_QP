@@ -45,6 +45,7 @@ void AQPProjectileBullet::SetBulletVelocity(const FVector& Direction, float Spee
 		ProjectileMovement->InitialSpeed = Speed;
 		ProjectileMovement->MaxSpeed = Speed;
 
+		/** [Network] 서버에서 생성된 초기 유속을 RepNotify 변수에 저장하여 클라이언트에 전달 */
 		if (HasAuthority())
 		{
 			ReplicatedInitialVelocity = CommonVelocity;
@@ -54,6 +55,7 @@ void AQPProjectileBullet::SetBulletVelocity(const FVector& Direction, float Spee
 
 void AQPProjectileBullet::OnRep_InitialVelocity()
 {
+	/** 클라이언트에서 서버가 보낸 초기 속도 값을 수신했을 때, 자신의 무브먼트 컴포넌트에 적용 */
 	if (ProjectileMovement)
 	{
 		ProjectileMovement->Velocity = ReplicatedInitialVelocity;
@@ -69,14 +71,17 @@ void AQPProjectileBullet::BeginPlay()
 	PrevLocation = GetActorLocation(); //이전 위치 초기화
 	if (AActor* OwnerActor = GetOwner())
 	{
-		//총알이 소유자(몸체 캡슐 등 전체)와 완벽하게 물리적으로 겹치지 않도록 양방향 무시 처리
+		/** 
+		 * 발사 직후 총알이 발사한 캐릭터(Owner)의 캡슐이나 메시와 충돌하여 
+		 * 제자리에서 터지는 것을 방지하기 위해 양방향으로 충돌을 무시하도록 설정합니다.
+		 */
 		BulletCollision->IgnoreActorWhenMoving(OwnerActor, true); 
 		TArray<UPrimitiveComponent*> OwnerComps;
 		OwnerActor->GetComponents(OwnerComps);
 		for (UPrimitiveComponent* Comp : OwnerComps)
 		{
 			BulletCollision->IgnoreComponentWhenMoving(Comp, true);
-			Comp->IgnoreComponentWhenMoving(BulletCollision, true); // 양방향 통과 확정
+			Comp->IgnoreComponentWhenMoving(BulletCollision, true); 
 		}
 	}
 	if (APawn* InstigatorPawn = GetInstigator())
@@ -84,7 +89,11 @@ void AQPProjectileBullet::BeginPlay()
 		BulletCollision->IgnoreActorWhenMoving(InstigatorPawn, true); 
 	}
 
-	// 발사될 때 전 화면에 있는 다른 총알들을 찾아내 서로 양방향(Bidirectional) 물리 충돌을 무시하도록 설정
+	/** 
+	 * [샷건 발사 로직 보완]
+	 * 샷건처럼 여러 발이 동시에 나갈 때, 총알끼리 서로 부딪혀 공중에서 멈추는 현상을 방지합니다.
+	 * 현재 월드에 존재하는 모든 투사체를 찾아 서로 무시하도록 설정합니다.
+	 */
 	TArray<AActor*> FoundBullets;
 	UGameplayStatics::GetAllActorsOfClass(GetWorld(), AQPProjectileBullet::StaticClass(), FoundBullets);
 	for (AActor* BulletActor : FoundBullets)
@@ -93,7 +102,6 @@ void AQPProjectileBullet::BeginPlay()
 		{
 			BulletCollision->IgnoreActorWhenMoving(BulletActor, true);
 			
-			// 상대방 총알의 물리 엔진에게도 '나(방금 태어난 총알)'를 무시하라고 즉시 알려줍니다. (샷건 총알들이 공중에서 서로 부딪혀 정지하는 현상 원천 봉쇄)
 			if (UPrimitiveComponent* OtherCollision = Cast<UPrimitiveComponent>(BulletActor->GetRootComponent()))
 			{
 				OtherCollision->IgnoreActorWhenMoving(this, true);
@@ -117,16 +125,22 @@ void AQPProjectileBullet::Tick(float DeltaTime)
 
 void AQPProjectileBullet::OnHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
-	// 자신이거나, 주인이거나, 겹친게 총알이면 타격 판정 및 파괴를 건너뜀 (다만 물리적으로는 이미 무시 설정되었으므로 이 코드는 2차 방어막임)
+	/** 
+	 * [타격 유효성 검사]
+	 * 타겟이 유효하지 않거나, 자기 자신/소유자/동일 클래스(다른 총알)일 경우 타격 처리를 하지 않습니다.
+	 */
 	if (!OtherActor || OtherActor == this || OtherActor == GetOwner() || OtherActor->IsA(AQPProjectileBullet::StaticClass()))
 	{
 		return; 
 	}
 
 	const FVector Dir = GetVelocity().GetSafeNormal();
+	
+	/** 엔진의 표준 PointDamage 시스템을 사용하여 타격 지점 및 방향 정보와 함께 데미지 전달 */
 	UGameplayStatics::ApplyPointDamage(OtherActor, Damage, Dir, Hit, GetInstigatorController(), this, DamageTypeClass);
 	
-	Destroy(); // 유효한 적이나 지형에 부딪히면 확실하게 파괴
+	/** 적이나 장애물에 충돌한 즉시 총알을 파괴하여 중복 타격 방지 */
+	Destroy(); 
 }
 
 void AQPProjectileBullet::Destroyed()

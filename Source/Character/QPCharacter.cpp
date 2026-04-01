@@ -27,16 +27,19 @@ AQPCharacter::AQPCharacter()
 	bUseControllerRotationPitch = false; //컨트롤러의 Pitch 회전에 따라 캐릭터 회전 안함
 	bUseControllerRotationRoll = false; //컨트롤러의 Roll 회전에 따라 캐릭터 회전 안함
 
-	UCharacterMovementComponent* MoveComponent = GetCharacterMovement(); //캐릭터 무브먼트 컴포넌트 가져오기
-	if (ensure(MoveComponent)) //무브먼트 컴포넌트가 유효한지 확인
+	UCharacterMovementComponent* MoveComponent = GetCharacterMovement(); 
+	if (ensure(MoveComponent)) 
 	{
-		MoveComponent->bOrientRotationToMovement = false; //이동 방향으로 캐릭터 회전 설정
-		MoveComponent->bUseControllerDesiredRotation = false; //컨트롤러의 원하는 회전 설정
-		MoveComponent->GetNavAgentPropertiesRef().bCanCrouch = true; //앉기 가능 설정
-		MoveComponent->MaxWalkSpeed = WalkSpeed; //기본 걷기 속도 설정
-		MoveComponent->MaxWalkSpeedCrouched = CrouchSpeed; //앉기 속도 설정
-		MoveComponent->BrakingDecelerationWalking = 100.f; // 멈출 때 관성 추가 (기본값보다 낮게)
-		MoveComponent->GroundFriction = 2.f; // 마찰력 감소로 부드러운 감속 유도
+		// 기본 회전 설정: 이동 방향으로 자동 회전하지 않고 컨트롤러/조준에 따라 수동 제어
+		MoveComponent->bOrientRotationToMovement = false; 
+		MoveComponent->bUseControllerDesiredRotation = false; 
+		
+		// 이동 관련 기본 물리 및 속도 설정
+		MoveComponent->GetNavAgentPropertiesRef().bCanCrouch = true; 
+		MoveComponent->MaxWalkSpeed = WalkSpeed; 
+		MoveComponent->MaxWalkSpeedCrouched = CrouchSpeed; 
+		MoveComponent->BrakingDecelerationWalking = 100.f; // 관성 있는 부드러운 멈춤을 위한 감속도 설정
+		MoveComponent->GroundFriction = 2.f; // 지면 마찰력을 낮춰 부드러운 움직임 유도
 	}
 	//카메라 붐 설정
 	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom")); //스프링암 컴포넌트 생성
@@ -237,25 +240,27 @@ void AQPCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	// 1. 카메라 줌, 피벗, 오프셋 변경
+	// 1. 카메라 줌, 피벗, 오프셋 변경 (조준, 앉기, 피치 각도에 따른 동적 변화)
 	UpdateCameraDynamics(DeltaTime);
 
-	// 2. 사망 시 카메라 화면 연출 (위에서 아래로 보는 뷰)
+	// 2. 사망 시 카메라 화면 연출 (캐릭터를 위에서 아래로 내려다보는 뷰로 부드럽게 전환)
 	UpdateDeathCamera(DeltaTime);
 
 	// 3. 이동 및 무기에 따른 캐릭터 지향(Rotation) 방식 결정 로직
 	UpdateRotationMode();
 
-	// 4. 에임 오프셋 (조준 방향에 따른 상체 회전 보간) 등 처리
+	// 4. 에임 오프셋 (조준 방향에 따른 상체 회전 보간) 및 제자리 회전(Turn In Place) 처리
 	AimOffset(DeltaTime); 
 
+	/** 주변 상호작용 가능한 아이템/무기 위젯 타겟 갱신 */
 	UpdatePickupWidgetTarget();
 	
-	UpdateFootstepNoise(DeltaTime); // 주기적으로 속도에 맞춰 소음(발소리) 발생
+	/** 캐릭터 속도와 상태에 따라 주기적으로 AI가 들을 수 있는 발소리 노이즈 발생 */
+	UpdateFootstepNoise(DeltaTime); 
 
 	if (HasAuthority() || IsLocallyControlled())
 	{
-		// 네트워크 관련 상태 업데이트 로직 (필요시 추가)
+		// 추가적인 상태 업데이트가 필요한 경우 여기에 작성
 	}
 }
 
@@ -268,36 +273,40 @@ void AQPCharacter::UpdateCameraDynamics(float DeltaTime)
 	FVector TargetOffset = FVector::ZeroVector; // 카메라 피벗 위치 조정 (기본값은 캐릭터 위치)
 	FRotator TargetRelRot = FRotator::ZeroRotator; // 카메라 상대 회전 (Pitch 조정용, 기본값은 회전 없음)
 
-	// '총'을 들고 있는 경우 (조준 여부 무관하게 드론 뷰 적용)
+	// '총'을 들고 있는 경우 (조준 여부 무관하게 역동적인 드론 뷰 적용)
 	bool bIsHoldingGun = (Weapontype == EQPWeaponType::EWT_Rifle || Weapontype == EQPWeaponType::EWT_Shotgun || Weapontype == EQPWeaponType::EWT_Handgun);
-	if (bIsHoldingGun) // 총을 들고 있는 경우 (조준 여부 무관하게 드론 뷰 적용)
+	if (bIsHoldingGun) 
 	{
-		float BaseArmLength = (IsAiming() ? AimingArmLength : DefaultArmLength) - 50.f; // 총을 들었을 때는 기본 거리에서 50cm 가까이 (Zoom In) - 조준 여부에 따라 기본 거리 조정 후 추가로 줌인
-		TargetArmLength = BaseArmLength; // 총을 들었을 때는 기본 거리에서 50cm 가까이 (Zoom In) - 조준 여부에 따라 기본 거리 조정 후 추가로 줌인
+		/** 조준 여부에 따라 기본 카메라 거리를 조절하고, 총기 파지 시에는 약간 더 줌인하여 긴박감 부여 */
+		float BaseArmLength = (IsAiming() ? AimingArmLength : DefaultArmLength) - 50.f; 
+		TargetArmLength = BaseArmLength; 
 
 		FRotator ControlRot = GetControlRotation();
 		float Pitch = ControlRot.Pitch;
-		if (Pitch > 180.f) // UE4의 Pitch는 0 ~ 360 범위이므로, -180 ~ 180 범위로 정규화
+		if (Pitch > 180.f) // UE4 Pitch 정규화 (0~360 -> -180~180)
 			Pitch -= 360.f;
 
-		if (Pitch < 0.f)  // 아래를 볼 때는 Pivot 상승 + 카메라 숙임 + 줌인 적용
+		/** 
+		 * 아래를 내려다볼 때 (Pitch < 0) 카메라가 바닥에 파묻히지 않도록 피벗을 위로 올리고, 
+		 * 위에서 아래로 내려다보는 각도를 커스텀하게 조절하여 탑다운 스타일의 뷰를 제공합니다.
+		 */
+		if (Pitch < 0.f)  
 		{
 			float AbsPitch = FMath::Abs(Pitch);
 
-			// Pitch가 0에서 -90 사이일 때, Pivot을 최대 150cm까지 상승시키고, 카메라를 최대 35도까지 숙이며, 카메라 거리를 최대 100cm까지 줌인
+			// 아래를 볼수록 캐릭터가 화면 하단에 위치하도록 피벗 높이(Z)를 최대 150cm 상승
 			float AddedHeight = FMath::GetMappedRangeValueClamped(FVector2D(0.f, 90.f), FVector2D(0.f, 150.f), AbsPitch);
 			TargetOffset.Z = AddedHeight;
 
-			// Pitch가 0에서 -90 사이일 때, 카메라를 최대 35도까지 숙이며, 카메라 거리를 최대 100cm까지 줌인
+			// 카메라 자체의 로컬 회전을 추가하여 내려다보는 느낌 강조 (최대 -35도)
 			float AddedPitch = FMath::GetMappedRangeValueClamped(FVector2D(0.f, 90.f), FVector2D(0.f, -35.f), AbsPitch);
 			TargetRelRot.Pitch = AddedPitch;
-			TargetOffset.X = 0.f;
 
-			// Pitch가 0에서 -90 사이일 때, 카메라 거리를 최대 100cm까지 줌인
+			// 아래를 볼수록 캐릭터에 더 밀착되게 줌인 처리
 			TargetArmLength = FMath::GetMappedRangeValueClamped(FVector2D(0.f, 90.f), FVector2D(BaseArmLength, BaseArmLength - 100.f), AbsPitch);
 		}
 	}
-	else // 총이 아닐 때는 기존 로직 유지 (Pitch에 따른 동적 줌)
+	else // 근접 무기 또는 맨손일 때의 동적 카메라 로직
 	{
 		if (IsAiming()) // 조준 중일 때는 Pitch에 따른 줌 대신 고정된 AimingArmLength 사용
 		{
@@ -624,24 +633,32 @@ void AQPCharacter::OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdj
 }
 void AQPCharacter::UpdateMovementSpeed() 
 {
-	UCharacterMovementComponent* MoveComponent = GetCharacterMovement(); //캐릭터 무브먼트 컴포넌트 가져오기
-	if (!MoveComponent) return; //무브먼트 컴포넌트가 없으면 함수 종료
+	UCharacterMovementComponent* MoveComponent = GetCharacterMovement(); 
+	if (!MoveComponent) return; 
 
-	// 달리기 가능 여부 판단: 달리기 버튼이 눌려 있고, 스태미나가 충분하며, 조준 중이 아니며, 공격 중이 아니며, 뒤로 걷기가 아닌 경우에만 달리기 허용
+	/**
+	 * 달리기 가능 조건 판단 로직:
+	 * 1. 사용자가 달리기 키를 누르고 있음 (bWantsToSprint)
+	 * 2. 스태미나가 충분함 (CanSprint)
+	 * 3. 조준 중이 아님 (IsAiming)
+	 * 4. 공격 애니메이션이 재생 중이 아님 (IsAttacking)
+	 * 5. 캐릭터 전방 방향으로 이동 중임 (MoveInputVector.X >= 0)
+	 */
 	bool bCanSprintState = bWantsToSprint && StatusComponent && StatusComponent->CanSprint() && !IsAiming();
 	if (CombatComponent && CombatComponent->IsAttacking()) bCanSprintState = false;
 	
-	// 뒤로 걷기일 때는 달리기 취소 (전진 혹은 전진 대각선, 횡이동 등 X >= 0 일 때만 달리기 허용)
+	// 뒤로 걷거나 대각선 뒤로 이동할 때는 달리기 속도를 적용하지 않음 (현실성 부여)
 	if (MoveInputVector.X < 0.f)
 	{
 		bCanSprintState = false;
 	}
 
-	if (bCanSprintState) //의사가 있고 조건이 맞으면
+	if (bCanSprintState) 
 	{
 		float TargetSprintSpeed = SprintSpeed;
 		float TargetCrouchSprintSpeed = CrouchSprintSpeed;
 
+		/** 스태미나가 일정 수치 이하(40%)로 떨어지면 지친 상태를 표현하기 위해 속도를 점진적으로 줄임 */
 		if (StatusComponent && StatusComponent->GetCurrentStamina() <= 40.f)
 		{
 			float StaminaRatio = FMath::Clamp(StatusComponent->GetCurrentStamina() / 40.f, 0.f, 1.f);
@@ -649,22 +666,22 @@ void AQPCharacter::UpdateMovementSpeed()
 			TargetCrouchSprintSpeed = FMath::Lerp(CrouchSpeed, CrouchSprintSpeed, StaminaRatio);
 		}
 
-		if (bIsCrouched) //앉아 있는지 확인
+		if (bIsCrouched) 
 		{
-			MoveComponent->MaxWalkSpeedCrouched = TargetCrouchSprintSpeed; //앉아서 뛰는 속도
+			MoveComponent->MaxWalkSpeedCrouched = TargetCrouchSprintSpeed; 
 		}
 		else
 		{
-			MoveComponent->MaxWalkSpeed = TargetSprintSpeed; //일어서서 뛰는 속도
+			MoveComponent->MaxWalkSpeed = TargetSprintSpeed; 
 		}
 	}
-	else if (bIsCrouched) //앉아 있는지 확인
+	else if (bIsCrouched) 
 	{
-		MoveComponent->MaxWalkSpeedCrouched = CrouchSpeed; //앉은 상태일 때 걷는 속도
+		MoveComponent->MaxWalkSpeedCrouched = CrouchSpeed; 
 	}
 	else 
 	{
-		MoveComponent->MaxWalkSpeed = WalkSpeed; //서있을 때의 걷는 속도
+		MoveComponent->MaxWalkSpeed = WalkSpeed; 
 	}
 }
 
@@ -1307,31 +1324,30 @@ void AQPCharacter::RefreshPickupCandidate(const AActor* ActorToIgnore)
 
 void AQPCharacter::MulticastDie_Implementation()
 {
-	// 클라이언트 측 캐릭터 사망 연출 실행
+	/** 
+	 * [사망 처리 시퀀스] 
+	 * 모든 클라이언트에서 공통적으로 실행되는 사망 시각적 연출 로직입니다.
+	 */
 
-	// 1. 공격 중지
+	// 1. 진행 중인 공격 동작 즉시 중단
 	if (CombatComponent)
 	{
 		CombatComponent->StopAttack();
 	}
 
-	// 2. 몽타주 재생 (사망 애니메이션)
+	// 2. 사망 애니메이션(몽타주) 재생 및 상태 고정
 	if (DeathMontage && GetMesh() && GetMesh()->GetAnimInstance())
 	{
-		// 기존 재생 중인 몽타주가 있다면 모두 정지하여 사망 애니메이션이 덮어쓰거나 씹히지 않도록 보장
+		// 기존 재생 중인 장전/발사 등의 애니메이션을 0.1초 내외로 블렌딩하며 정지
 		GetMesh()->GetAnimInstance()->Montage_Stop(0.1f, nullptr);
-
-		if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Cyan, TEXT("QPCharacter: DeathMontage and AnimInstance valid, attempting to play."));
 
 		float MontageDuration = GetMesh()->GetAnimInstance()->Montage_Play(DeathMontage);
 		
-		if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 5.f, FColor::Orange, FString::Printf(TEXT("QPCharacter: Played Montage. Duration = %f"), MontageDuration));
-
 		if (MontageDuration > 0.f)
 		{
 			TWeakObjectPtr<AQPCharacter> WeakThis(this);
 			FTimerHandle AnimPauseTimerHandle;
-			// 유저 요청에 따라 몽타주 길이에 상관없이 2초 후 애니메이션을 정지시킵니다.
+			/** 사망 애니메이션이 끝난 후 쓰러진 상태를 유지하기 위해 2초 후 애니메이션을 정지(Pause) 시킴 */
 			GetWorld()->GetTimerManager().SetTimer(AnimPauseTimerHandle, FTimerDelegate::CreateLambda([WeakThis]()
 			{
 				if (WeakThis.IsValid() && WeakThis->GetMesh())
@@ -1342,6 +1358,7 @@ void AQPCharacter::MulticastDie_Implementation()
 		}
 	}
 
+	// 3. 충돌 설정 변경: 사망한 시체는 더 이상 다른 캐릭터나 카메라와 충돌하지 않도록 설정
 	if (UCapsuleComponent* CapsuleComp = GetCapsuleComponent())
 	{
 		CapsuleComp->SetCollisionResponseToChannel(ECollisionChannel::ECC_Pawn, ECollisionResponse::ECR_Ignore);
@@ -1355,22 +1372,25 @@ void AQPCharacter::MulticastDie_Implementation()
 		GetMesh()->SetCollisionResponseToChannel(ECollisionChannel::ECC_Visibility, ECollisionResponse::ECR_Ignore);
 	}
 
+	// 4. 사망 카메라 연출 시작: 카메라를 캐릭터에서 분리하여 관전 시점(Transition)으로 전환 준비
 	if (CameraBoom)
 	{
 		FDetachmentTransformRules DetachRules(EDetachmentRule::KeepWorld, true);
-		CameraBoom->DetachFromComponent(DetachRules);
-		CameraBoom->bDoCollisionTest = false;
+		CameraBoom->DetachFromComponent(DetachRules); // 캐릭터 몸에서 카메라 붐을 분할
+		CameraBoom->bDoCollisionTest = false; // 시체 등에 카메라가 떨리는 현상 방지
 
+		// 컨트롤러 입력 상속 해제
 		CameraBoom->bUsePawnControlRotation = false;
 		CameraBoom->bInheritPitch = false;
 		CameraBoom->bInheritRoll = false;
 		CameraBoom->bInheritYaw = false;
 		
+		// UpdateDeathCamera 함수에서 처리될 보간 애니메이션 트리거 활성화
 		bIsDeathCameraTransitioning = true;
 		bIsDeathCameraFreeMode = false;
 	}
 
-	// 5. 캐릭터 이동 불가 상태로 변경
+	// 5. 캐릭터 이동 컴포넌트 비활성화 (물리 엔진 적용 중단)
 	if (GetCharacterMovement())
 	{
 		GetCharacterMovement()->DisableMovement();

@@ -18,13 +18,16 @@ void AGunWeapon::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// 샷건과 권총은 기본적으로 단발(반자동) 무기로 취급하여 버튼을 꾹 눌러도 연사되지 않도록 설정
+	/** 
+	 * [무기별 커스터마이징 초기화]
+	 * 샷건과 권총은 연사(Full-Auto) 시 밸런스 및 조작감을 위해 반자동 무기로 설정합니다.
+	 */
 	if (WeaponType == EQPWeaponType::EWT_Shotgun || WeaponType == EQPWeaponType::EWT_Handgun)
 	{
 		bAutomatic = false;
 	}
 
-	// 무기 타입에 따른 기본 총알 설정 및 기본 연사 간격 조절
+	/** 무기 타입에 따른 기본 장탄수 및 연사 간격(FireRate) 보정 */
 	if (WeaponType == EQPWeaponType::EWT_Rifle) 
 	{
 		MagCapacity = 30;
@@ -32,12 +35,14 @@ void AGunWeapon::BeginPlay()
 	else if (WeaponType == EQPWeaponType::EWT_Handgun) 
 	{
 		MagCapacity = 10;
-		if (FMath::IsNearlyEqual(FireRate, 0.15f)) FireRate = 0.3f; // 권총은 빠른 클릭 시 0.3초의 발사 간격을 가짐
+		// 권총의 발사 간격이 너무 빠르면 0.3초로 제한하여 안정성 확보
+		if (FMath::IsNearlyEqual(FireRate, 0.15f)) FireRate = 0.3f; 
 	}
 	else if (WeaponType == EQPWeaponType::EWT_Shotgun) 
 	{
 		MagCapacity = 4;
-		if (FMath::IsNearlyEqual(FireRate, 0.15f)) FireRate = 0.8f; // 샷건은 빠른 클릭 시 0.8초의 발사 간격을 가짐
+		// 샷건은 강력한 화력을 고려해 발사 간격을 0.8초로 길게 설정
+		if (FMath::IsNearlyEqual(FireRate, 0.15f)) FireRate = 0.8f; 
 	}
 
 	CurrentAmmo = MagCapacity;
@@ -49,28 +54,35 @@ void AGunWeapon::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifeti
 	DOREPLIFETIME(AGunWeapon, CurrentAmmo);
 }
 
-void AGunWeapon::StartFire_Implementation() //발사 시작 함수 재정의
+void AGunWeapon::StartFire_Implementation() 
 {
-	if (CurrentAmmo <= 0) return; // 잔탄이 없으면 발사하지 않음
+	/** 발사 가능 조건 확인: 탄약이 있어야 함 */
+	if (CurrentAmmo <= 0) return; 
 
-	SpendRound(); // 발사할 때 장탄수 1 감소
+	/** 한 발 소비 후 실제 발사 로직 수행 */
+	SpendRound(); 
 	FireOnce();
 	
-	// 소음(총소리) 발생
+	/**
+	 * [AI 소음 보고 시스템]
+	 * 총기 발사 시 주변 AI(좀비 등)가 감지할 수 있는 소음을 발생시킵니다.
+	 * 무기 종류에 따라 소음의 크기(Loudness)를 다르게 설정합니다.
+	 */
 	if (GetOwner())
 	{
-		// 플레이어가 뛰는 소리(0.5)를 기준으로 비율 설정
+		// 기본적인 '뛰는 소리(0.5)' 배율을 기준으로 설정
 		float NoiseLoudness = 1.0f; 
 
 		if (WeaponType == EQPWeaponType::EWT_Handgun) 
 		{
-			NoiseLoudness = 2.0f; // 권총: 뛰는 소리 2배
+			NoiseLoudness = 2.0f; // 권총: 뛰는 소리의 2배
 		}
 		else if (WeaponType == EQPWeaponType::EWT_Rifle || WeaponType == EQPWeaponType::EWT_Shotgun)
 		{
-			NoiseLoudness = 4.0f; // 라이플 / 샷건: 뛰는 소리 4배
+			NoiseLoudness = 4.0f; // 라이플 / 샷건: 뛰는 소리의 4배
 		}
 
+		// AISense_Hearing을 통해 월드에 소음 이벤트 보고
 		UAISense_Hearing::ReportNoiseEvent(GetWorld(), GetActorLocation(), NoiseLoudness, Cast<APawn>(GetOwner()), 0.f, TEXT("WeaponNoise"));
 	}
 }
@@ -82,15 +94,17 @@ void AGunWeapon::StopAttack_Implementation() //공격 중지 함수 재정의
 
 void AGunWeapon::FireOnce()
 {
-	ACharacter* OwnerCharacter = Cast<ACharacter>(GetOwner()); //무기 소유자를 캐릭터로 캐스팅
-	if (!OwnerCharacter) return; //소유자가 유효하지 않으면 반환
+	ACharacter* OwnerCharacter = Cast<ACharacter>(GetOwner()); 
+	if (!OwnerCharacter) return; 
 
-	PelletsFiredCount = 0; // 발사된 총알 수 초기화
+	PelletsFiredCount = 0; 
 
 	if (WeaponType == EQPWeaponType::EWT_Shotgun)
 	{
-		// [Fix] 샷건은 타이머 대신 한 프레임에 정해진 산탄 개수만큼 반복 발사하여 
-		// 진짜 샷건처럼 여러 발이 동시에 부채꼴로 퍼져나가게 변경했습니다.
+		/** 
+		 * 샷건은 한 프레임에 여러 개의 산탄을 부채꼴 형태로 동시 발사합니다.
+		 * 타이머를 사용하지 않고 루프를 통해 즉시 다수의 Pellets을 생성합니다.
+		 */
 		for (int32 i = 0; i < ShotgunPelletCount; ++i)
 		{
 			FireSinglePellet();
@@ -98,75 +112,73 @@ void AGunWeapon::FireOnce()
 	}
 	else
 	{
-		// 샷건이 아닌 무기(권총, 소총 등)는 단 한 발만 즉시 발사
+		// 일반 총기는 단 한 개의 투사체만 즉시 발사
 		FireSinglePellet();
 	}
 }
 
 void AGunWeapon::FireSinglePellet()
 {
-	ACharacter* OwnerCharacter = Cast<ACharacter>(GetOwner()); //무기 소유자를 캐릭터로 캐스팅
-	if (!OwnerCharacter) return; //소유자가 유효하지 않으면 반환
+	ACharacter* OwnerCharacter = Cast<ACharacter>(GetOwner());
+	if (!OwnerCharacter) return; 
 
-	// 무기 타입에 따른 사거리(Range) 및 퍼짐 각도 설정
+	// 1. 무기 타입에 따른 사거리 및 퍼짐 각도 결정
 	float CurrentRange = Range;
 	float CurrentSpreadAngle = 0.f;
 
 	if (WeaponType == EQPWeaponType::EWT_Handgun)
 	{
-		CurrentRange = HandgunRange; // 권총은 사거리가 짧음
+		CurrentRange = HandgunRange; 
 	}
 	else if (WeaponType == EQPWeaponType::EWT_Shotgun)
 	{
-		CurrentSpreadAngle = ShotgunSpreadAngle; // 샷건 퍼짐 각도 적용
+		CurrentSpreadAngle = ShotgunSpreadAngle; 
 	}
 
-	// 소유 캐릭터의 컴포넌트에서 QPCombatComponent를 찾아서 크로스헤어 타겟 정보(HitTarget)를 가져옴
+	/** QPCombatComponent에서 계산된 크로스헤어 타겟(HitTarget)을 가져옵니다. */
 	UQPCombatComponent* CombatComponent = OwnerCharacter->FindComponentByClass<UQPCombatComponent>();
 	if (!CombatComponent) return;
 
-	// 크로스헤어 타겟 (HitTarget)
+	/** 화면 중앙(크로스헤어)이 가리키는 월드 좌표 */
 	const FVector TraceEnd = CombatComponent->HitTarget;
 
-	//Bullet Projectile Spawn
-	FVector MuzzleLocation = GetActorLocation(); //기본 총구 위치를 액터 위치로 설정
-	if (WeaponMesh && WeaponMesh->DoesSocketExist(MuzzleSocketName))//무기 메쉬와 총구 소켓이 유효한 경우
+	// 2. 총구 위치(Muzzle) 계산
+	FVector MuzzleLocation = GetActorLocation(); 
+	if (WeaponMesh && WeaponMesh->DoesSocketExist(MuzzleSocketName))
 	{
-		MuzzleLocation = WeaponMesh->GetSocketLocation(MuzzleSocketName); //총구 소켓 위치 가져오기
+		MuzzleLocation = WeaponMesh->GetSocketLocation(MuzzleSocketName); 
 	}
 
-	// 총알 방향 계산 (총구에서 타겟까지의 방향 벡터)
+	// 3. 발사 방향 계산
 	const FVector BaseBulletDir = (TraceEnd - MuzzleLocation).GetSafeNormal();
 	FVector FinalBulletDir = BaseBulletDir;
 
-	// 샷건일 경우 퍼짐(Spread) 적용
+	/** 샷건일 경우 설정된 각도 내에서 랜덤하게 방향을 틀어 탄 퍼짐 구현 */
 	if (CurrentSpreadAngle > 0.f)
 	{
-		// 원뿔 형태로 랜덤하게 방향 벡터를 틀어줌 (HalfAngle 형태이므로 FMath::DegreesToRadians 사용)
 		float HalfAngleRad = FMath::DegreesToRadians(CurrentSpreadAngle);
 		FinalBulletDir = FMath::VRandCone(BaseBulletDir, HalfAngleRad);
 	}
 
-	// 사거리 제한 적용 (목표점이 너무 멀면 방향만 유지하고 최대 사거리까지만 쏘도록)
+	// 4. 사거리 제한을 적용한 최종 타겟 위치 (필요시 트레이스 용도로 활용 가능)
 	FVector FinalTarget = MuzzleLocation + (FinalBulletDir * CurrentRange);
 
-	// DrawDebugLine(GetWorld(), MuzzleLocation, FinalTarget, FColor::Red, false, 2.0f, 0, 2.0f); //디버그 라인이 총구에서 나가도록 그리기
+	// 5. 서버/클라이언트 공통 투사체 스폰 로직
+	FActorSpawnParameters SpawnParams; 
+	SpawnParams.Owner = OwnerCharacter; 
+	SpawnParams.Instigator = OwnerCharacter; 
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn; 
 
-	FActorSpawnParameters SpawnParams; //스폰 파라미터 설정
-	SpawnParams.Owner = OwnerCharacter; //소유자 설정
-	SpawnParams.Instigator = OwnerCharacter; //인스티게이터 설정
-	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn; // 어떤 구조물에 겹쳐도 무조건 스폰되게 보장
-
-	const FRotator SpawnRotation = FinalBulletDir.Rotation(); //발사 방향을 회전으로 변환
-	AQPProjectileBullet* ProjectileBullet = GetWorld()->SpawnActor<AQPProjectileBullet>(ProjectileBulletClass, MuzzleLocation, SpawnRotation, SpawnParams); //투사체 불릿 스폰
+	const FRotator SpawnRotation = FinalBulletDir.Rotation(); 
+	AQPProjectileBullet* ProjectileBullet = GetWorld()->SpawnActor<AQPProjectileBullet>(ProjectileBulletClass, MuzzleLocation, SpawnRotation, SpawnParams); 
 	
 	if (ProjectileBullet) 
 	{
-		ProjectileBullet->SetBulletVelocity(FinalBulletDir, BulletSpeed); //계산된 총알 방향으로 속도 설정
+		/** 생성된 투사체에 속도 및 데미지 정보 전달 */
+		ProjectileBullet->SetBulletVelocity(FinalBulletDir, BulletSpeed); 
 		ProjectileBullet->Damage = BaseDamage;
 		ProjectileBullet->DamageTypeClass = DamageTypeClass;
 	}
-
 }
 
 void AGunWeapon::AddAmmo(int32 AmountToAdd)
