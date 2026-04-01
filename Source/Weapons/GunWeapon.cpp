@@ -1,6 +1,3 @@
-﻿// Fill out your copyright notice in the Description page of Project Settings.
-
-
 #include "GunWeapon.h"
 #include "Kismet/GameplayStatics.h"
 #include "DrawDebugHelpers.h"
@@ -9,10 +6,12 @@
 #include "Camera/PlayerCameraManager.h"
 #include "Projectiles/QPProjectileBullet.h"
 #include "PJ_Quiet_Protocol/Character/Components/QPCombatComponent.h"
+#include "Net/UnrealNetwork.h"
+#include "Perception/AISense_Hearing.h"
 
 AGunWeapon::AGunWeapon()
 {
-	WeaponType = EQPWeaponType::EWT_Rifle; //기본 무기 타입을 소총으로 설정 (추후 자식 클래스에서 변경 가능)
+	WeaponType = EQPWeaponType::EWT_Rifle;
 }
 
 void AGunWeapon::BeginPlay()
@@ -24,11 +23,56 @@ void AGunWeapon::BeginPlay()
 	{
 		bAutomatic = false;
 	}
+
+	// 무기 타입에 따른 기본 총알 설정 및 기본 연사 간격 조절
+	if (WeaponType == EQPWeaponType::EWT_Rifle) 
+	{
+		MagCapacity = 30;
+	}
+	else if (WeaponType == EQPWeaponType::EWT_Handgun) 
+	{
+		MagCapacity = 10;
+		if (FMath::IsNearlyEqual(FireRate, 0.15f)) FireRate = 0.3f; // 권총은 빠른 클릭 시 0.3초의 발사 간격을 가짐
+	}
+	else if (WeaponType == EQPWeaponType::EWT_Shotgun) 
+	{
+		MagCapacity = 4;
+		if (FMath::IsNearlyEqual(FireRate, 0.15f)) FireRate = 0.8f; // 샷건은 빠른 클릭 시 0.8초의 발사 간격을 가짐
+	}
+
+	CurrentAmmo = MagCapacity;
+}
+
+void AGunWeapon::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME(AGunWeapon, CurrentAmmo);
 }
 
 void AGunWeapon::StartFire_Implementation() //발사 시작 함수 재정의
 {
-	FireOnce(); //한 번 발사
+	if (CurrentAmmo <= 0) return; // 잔탄이 없으면 발사하지 않음
+
+	SpendRound(); // 발사할 때 장탄수 1 감소
+	FireOnce();
+	
+	// 소음(총소리) 발생
+	if (GetOwner())
+	{
+		// 플레이어가 뛰는 소리(0.5)를 기준으로 비율 설정
+		float NoiseLoudness = 1.0f; 
+
+		if (WeaponType == EQPWeaponType::EWT_Handgun) 
+		{
+			NoiseLoudness = 2.0f; // 권총: 뛰는 소리 2배
+		}
+		else if (WeaponType == EQPWeaponType::EWT_Rifle || WeaponType == EQPWeaponType::EWT_Shotgun)
+		{
+			NoiseLoudness = 4.0f; // 라이플 / 샷건: 뛰는 소리 4배
+		}
+
+		UAISense_Hearing::ReportNoiseEvent(GetWorld(), GetActorLocation(), NoiseLoudness, Cast<APawn>(GetOwner()), 0.f, TEXT("WeaponNoise"));
+	}
 }
 
 void AGunWeapon::StopAttack_Implementation() //공격 중지 함수 재정의
@@ -36,8 +80,7 @@ void AGunWeapon::StopAttack_Implementation() //공격 중지 함수 재정의
 	// 기본 구현 (필요시 추가)
 }
 
-//임시 코드 다음에 프로젝트일 만들어서 총알 나가게 수정 현재는 히트스캔
-void AGunWeapon::FireOnce() //한 번 발사 함수
+void AGunWeapon::FireOnce()
 {
 	ACharacter* OwnerCharacter = Cast<ACharacter>(GetOwner()); //무기 소유자를 캐릭터로 캐스팅
 	if (!OwnerCharacter) return; //소유자가 유효하지 않으면 반환
@@ -46,11 +89,12 @@ void AGunWeapon::FireOnce() //한 번 발사 함수
 
 	if (WeaponType == EQPWeaponType::EWT_Shotgun)
 	{
-		// 이전에 실행 중이던 타이머가 있다면 초기화하여 겹치는 현상 방지
-		GetWorldTimerManager().ClearTimer(ShotgunFireTimerHandle);
-		
-		// 지정된 간격(TimeBetweenPellets)마다 FireSinglePellet을 반복 호출
-		GetWorldTimerManager().SetTimer(ShotgunFireTimerHandle, this, &AGunWeapon::FireSinglePellet, TimeBetweenPellets, true, 0.f);
+		// [Fix] 샷건은 타이머 대신 한 프레임에 정해진 산탄 개수만큼 반복 발사하여 
+		// 진짜 샷건처럼 여러 발이 동시에 부채꼴로 퍼져나가게 변경했습니다.
+		for (int32 i = 0; i < ShotgunPelletCount; ++i)
+		{
+			FireSinglePellet();
+		}
 	}
 	else
 	{
@@ -106,11 +150,12 @@ void AGunWeapon::FireSinglePellet()
 	// 사거리 제한 적용 (목표점이 너무 멀면 방향만 유지하고 최대 사거리까지만 쏘도록)
 	FVector FinalTarget = MuzzleLocation + (FinalBulletDir * CurrentRange);
 
-	DrawDebugLine(GetWorld(), MuzzleLocation, FinalTarget, FColor::Red, false, 2.0f, 0, 2.0f); //디버그 라인이 총구에서 나가도록 그리기
+	// DrawDebugLine(GetWorld(), MuzzleLocation, FinalTarget, FColor::Red, false, 2.0f, 0, 2.0f); //디버그 라인이 총구에서 나가도록 그리기
 
 	FActorSpawnParameters SpawnParams; //스폰 파라미터 설정
 	SpawnParams.Owner = OwnerCharacter; //소유자 설정
 	SpawnParams.Instigator = OwnerCharacter; //인스티게이터 설정
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn; // 어떤 구조물에 겹쳐도 무조건 스폰되게 보장
 
 	const FRotator SpawnRotation = FinalBulletDir.Rotation(); //발사 방향을 회전으로 변환
 	AQPProjectileBullet* ProjectileBullet = GetWorld()->SpawnActor<AQPProjectileBullet>(ProjectileBulletClass, MuzzleLocation, SpawnRotation, SpawnParams); //투사체 불릿 스폰
@@ -122,20 +167,14 @@ void AGunWeapon::FireSinglePellet()
 		ProjectileBullet->DamageTypeClass = DamageTypeClass;
 	}
 
-	// 샷건일 경우 지정된 총알 수만큼 쐈는지 확인하고 타이머 종료
-	if (WeaponType == EQPWeaponType::EWT_Shotgun)
-	{
-		PelletsFiredCount++;
-		if (PelletsFiredCount >= ShotgunPelletCount)
-		{
-			GetWorldTimerManager().ClearTimer(ShotgunFireTimerHandle);
-		}
-	}
+}
 
-	/*if (bHit && Hit.GetActor()) //히트했으며 히트한 액터가 유효한 경우
-	{
+void AGunWeapon::AddAmmo(int32 AmountToAdd)
+{
+	CurrentAmmo = FMath::Clamp(CurrentAmmo + AmountToAdd, 0, MagCapacity);
+}
 
-		UGameplayStatics::ApplyPointDamage(Hit.GetActor(), BaseDamage, Dir, Hit, OwnerCharacter->GetInstigatorController(), this, DamageTypeClass);//데미지 적용
-
-	}*/
+void AGunWeapon::SpendRound()
+{
+	CurrentAmmo = FMath::Clamp(CurrentAmmo - 1, 0, MagCapacity);
 }

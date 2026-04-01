@@ -13,6 +13,14 @@ public:
 	AQPProjectileBullet();
 	void SetBulletVelocity(const FVector& Direction, float Speed); //총알 속도 설정 함수
 
+	UPROPERTY(ReplicatedUsing = OnRep_InitialVelocity)
+	FVector ReplicatedInitialVelocity;
+
+	UFUNCTION()
+	void OnRep_InitialVelocity();
+
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Bullet")
 	float Damage = 10.f;
 
@@ -24,6 +32,7 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void Destroyed() override; // 액터 파괴 시 호출되어 이펙트를 확실히 제거
 	virtual void Tick(float DeltaTime) override;
 	UPROPERTY(VisibleAnywhere, Category = "Bullet")
 	TObjectPtr<class USphereComponent> BulletCollision; //총알 충돌 컴포넌트

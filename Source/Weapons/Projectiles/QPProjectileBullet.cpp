@@ -7,33 +7,58 @@
 #include "NiagaraComponent.h"
 #include "NiagaraSystem.h"
 #include "Kismet/GameplayStatics.h"
+#include "Net/UnrealNetwork.h"
 AQPProjectileBullet::AQPProjectileBullet()
 {
 	PrimaryActorTick.bCanEverTick = true;
-	BulletCollision = CreateDefaultSubobject<USphereComponent>(TEXT("BulletCollision")); //총알 충돌 컴포넌트 생성
-	SetRootComponent(BulletCollision); //루트 컴포넌트로 설정
-	BulletCollision->InitSphereRadius(5.f); //충돌 반지름 설정
-	BulletCollision->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics); //충돌 활성화 설정
-	BulletCollision->SetCollisionResponseToAllChannels(ECR_Block); //모든 채널에 대해 충돌 응답 설정
+	BulletCollision = CreateDefaultSubobject<USphereComponent>(TEXT("BulletCollision"));
+	SetRootComponent(BulletCollision);
+	BulletCollision->InitSphereRadius(5.f);
+	BulletCollision->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	BulletCollision->SetCollisionResponseToAllChannels(ECR_Block);
+	BulletCollision->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
 
-	ProjectileMovement = CreateDefaultSubobject<UProjectileMovementComponent>(TEXT("ProjectileMovement")); //총알 이동 컴포넌트 생성
-	ProjectileMovement->bRotationFollowsVelocity = true; //회전이 속도를 따르도록 설정
-	ProjectileMovement->ProjectileGravityScale = 1.0f; //중력 스케일 설정
+	ProjectileMovement = CreateDefaultSubobject<UProjectileMovementComponent>(TEXT("ProjectileMovement"));
+	ProjectileMovement->bRotationFollowsVelocity = true;
+	ProjectileMovement->ProjectileGravityScale = 1.0f;
 
-	//총알 메쉬 컴포넌트 생성
 	BulletMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("BulletMesh"));
-	BulletMesh->SetupAttachment(RootComponent); //루트 컴포넌트에
-	BulletMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics); //충돌 비활성화 설정
-	InitialLifeSpan = 5.0f; //수명 설정
+	BulletMesh->SetupAttachment(RootComponent);
+	BulletMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	InitialLifeSpan = 3.0f;
+
+	bReplicates = true;
+	SetReplicateMovement(true);
+}
+
+void AQPProjectileBullet::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME(AQPProjectileBullet, ReplicatedInitialVelocity);
 }
 
 void AQPProjectileBullet::SetBulletVelocity(const FVector& Direction, float Speed)
 {
 	if (ProjectileMovement) {
-		const FVector CommonVelocity = Direction.GetSafeNormal() * Speed; //방향을 정규화하고 속도 곱하기
-		ProjectileMovement->Velocity = CommonVelocity; //총알 이동 컴포넌트
-		ProjectileMovement->InitialSpeed = Speed; //초기 속도 설정
-		ProjectileMovement->MaxSpeed = Speed; //최대 속도 설정
+		const FVector CommonVelocity = Direction.GetSafeNormal() * Speed;
+		ProjectileMovement->Velocity = CommonVelocity;
+		ProjectileMovement->InitialSpeed = Speed;
+		ProjectileMovement->MaxSpeed = Speed;
+
+		if (HasAuthority())
+		{
+			ReplicatedInitialVelocity = CommonVelocity;
+		}
+	}
+}
+
+void AQPProjectileBullet::OnRep_InitialVelocity()
+{
+	if (ProjectileMovement)
+	{
+		ProjectileMovement->Velocity = ReplicatedInitialVelocity;
+		ProjectileMovement->InitialSpeed = ReplicatedInitialVelocity.Size();
+		ProjectileMovement->MaxSpeed = ProjectileMovement->InitialSpeed;
 	}
 }
 
@@ -44,45 +69,75 @@ void AQPProjectileBullet::BeginPlay()
 	PrevLocation = GetActorLocation(); //이전 위치 초기화
 	if (AActor* OwnerActor = GetOwner())
 	{
-		//총알이 소유자와 충돌하지 않도록 설정
-		BulletCollision->IgnoreActorWhenMoving(OwnerActor, true); //소유자 무시
+		//총알이 소유자(몸체 캡슐 등 전체)와 완벽하게 물리적으로 겹치지 않도록 양방향 무시 처리
+		BulletCollision->IgnoreActorWhenMoving(OwnerActor, true); 
+		TArray<UPrimitiveComponent*> OwnerComps;
+		OwnerActor->GetComponents(OwnerComps);
+		for (UPrimitiveComponent* Comp : OwnerComps)
+		{
+			BulletCollision->IgnoreComponentWhenMoving(Comp, true);
+			Comp->IgnoreComponentWhenMoving(BulletCollision, true); // 양방향 통과 확정
+		}
 	}
 	if (APawn* InstigatorPawn = GetInstigator())
 	{
-		//총알이 인스티게이터와 충돌하지 않도록 설정
-		BulletCollision->IgnoreActorWhenMoving(InstigatorPawn, true); //인스티게이터 무시
+		BulletCollision->IgnoreActorWhenMoving(InstigatorPawn, true); 
+	}
+
+	// 발사될 때 전 화면에 있는 다른 총알들을 찾아내 서로 양방향(Bidirectional) 물리 충돌을 무시하도록 설정
+	TArray<AActor*> FoundBullets;
+	UGameplayStatics::GetAllActorsOfClass(GetWorld(), AQPProjectileBullet::StaticClass(), FoundBullets);
+	for (AActor* BulletActor : FoundBullets)
+	{
+		if (BulletActor != this)
+		{
+			BulletCollision->IgnoreActorWhenMoving(BulletActor, true);
+			
+			// 상대방 총알의 물리 엔진에게도 '나(방금 태어난 총알)'를 무시하라고 즉시 알려줍니다. (샷건 총알들이 공중에서 서로 부딪혀 정지하는 현상 원천 봉쇄)
+			if (UPrimitiveComponent* OtherCollision = Cast<UPrimitiveComponent>(BulletActor->GetRootComponent()))
+			{
+				OtherCollision->IgnoreActorWhenMoving(this, true);
+			}
+		}
 	}
 
 	if (TrailFX) {
 		TrailFXComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(TrailFX, RootComponent, NAME_None, FVector::ZeroVector, FRotator::ZeroRotator,
-			EAttachLocation::SnapToTarget, true, true, ENCPoolMethod::AutoRelease, true);  //트레일 이펙트 생성 및 부착
+			EAttachLocation::SnapToTarget, true, true, ENCPoolMethod::AutoRelease, true);
 	}
 	if (TrailFXComponent) {
-		TrailFXComponent->SetWorldScale3D(TrailFXScale);  //트레일 이펙트 스케일 설정
-		bDebugDrawTracer = false;
+		TrailFXComponent->SetWorldScale3D(TrailFXScale);
 	}
 }
 
 void AQPProjectileBullet::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-	if (bDebugDrawTracer) {
-		const FVector CurrentLocation = GetActorLocation(); //현재 위치 가져오기
-		DrawDebugLine(GetWorld(), PrevLocation, CurrentLocation, FColor::Green, false, DebugSegmentLifeTime, 0, DebugThickness); //디버그 선 그리기
-		PrevLocation = CurrentLocation; //이전 위치 업데이트
-	}
 }
 
 void AQPProjectileBullet::OnHit(UPrimitiveComponent* HitComponent, AActor* OtherActor, UPrimitiveComponent* OtherComp, FVector NormalImpulse, const FHitResult& Hit)
 {
-	AActor* MyOwner = GetOwner();
-
-	if (OtherActor && OtherActor != this && OtherActor != MyOwner)
+	// 자신이거나, 주인이거나, 겹친게 총알이면 타격 판정 및 파괴를 건너뜀 (다만 물리적으로는 이미 무시 설정되었으므로 이 코드는 2차 방어막임)
+	if (!OtherActor || OtherActor == this || OtherActor == GetOwner() || OtherActor->IsA(AQPProjectileBullet::StaticClass()))
 	{
-		const FVector Dir = GetVelocity().GetSafeNormal();
-		UGameplayStatics::ApplyPointDamage(OtherActor, Damage, Dir, Hit, GetInstigatorController(), this, DamageTypeClass);
+		return; 
 	}
-	Destroy();
+
+	const FVector Dir = GetVelocity().GetSafeNormal();
+	UGameplayStatics::ApplyPointDamage(OtherActor, Damage, Dir, Hit, GetInstigatorController(), this, DamageTypeClass);
+	
+	Destroy(); // 유효한 적이나 지형에 부딪히면 확실하게 파괴
+}
+
+void AQPProjectileBullet::Destroyed()
+{
+	if (TrailFXComponent)
+	{
+		// 총알이 파괴될 때 남아있는 꼬리(Trail) 이펙트도 즉시 강제로 지워줍니다.
+		TrailFXComponent->DestroyComponent(); 
+	}
+
+	Super::Destroyed();
 }
 
 

@@ -22,7 +22,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Combat|Weapon")
 	void SetOverlappingWeapon(AWeaponBase* Weapon);
 	UFUNCTION(BlueprintCallable, Category = "Combat|Weapon")
-	FORCEINLINE AWeaponBase* GetOverlappingWeapon() const { return OverlappingWeapon; } //겹쳐진 무기 반환 함수
+	FORCEINLINE AWeaponBase* GetOverlappingWeapon() const { return OverlappingWeapon; }
 	UFUNCTION(BlueprintPure, Category = "Combat")
 	FORCEINLINE FVector GetDesiredCameraOffset() const 
 	{ 
@@ -40,15 +40,15 @@ public:
 			return Result;
 		}
 		return bIsCrouched ? CrouchCameraPosOffset : StandingCameraOffset; 
-	} //원하는 카메라 오프셋 반환
+	}
 	UFUNCTION(BlueprintPure, Category = "Combat")
-	FORCEINLINE UQPCombatComponent* GetCombatComponent() const { return CombatComponent; } //전투 컴포넌트 반환 함수
+	FORCEINLINE UQPCombatComponent* GetCombatComponent() const { return CombatComponent; }
 	UFUNCTION(BlueprintPure, Category = "Status")
-	FORCEINLINE UQPStatusComponent* GetStatusComponent() const { return StatusComponent; } //상태 컴포넌트 반환 함수
+	FORCEINLINE UQPStatusComponent* GetStatusComponent() const { return StatusComponent; }
 	UFUNCTION(BlueprintPure, Category = "Combat")
-	FORCEINLINE EQPWeaponType GetWeaponType() const { return Weapontype; } //장착된 무기 타입 반환 함수
+	FORCEINLINE EQPWeaponType GetWeaponType() const { return Weapontype; }
 	UFUNCTION(BlueprintPure, Category = "Combat")
-	bool IsSprinting() const; //앞으로 달리기는 중인지 반환 함수
+	bool IsSprinting() const;
 	bool IsAiming() const; //조준 중인지
 
 	UFUNCTION(BlueprintPure, Category = "Inventory")
@@ -193,12 +193,34 @@ private:
 	UFUNCTION(Server, Reliable)
 	void ServerStopSprint();
 
+	UFUNCTION(Server, Reliable)
+	void ServerEquipOverlappingWeapon(class AWeaponBase* Weapon);
+
+	UFUNCTION(Server, Reliable)
+	void ServerDestroyPickupActor(class AActor* PickupActor);
+
+	UFUNCTION(Server, Reliable)
+	void ServerSpawnAndEquipWeapon(TSubclassOf<class AWeaponBase> WeaponClass);
+
+	UFUNCTION(Server, Reliable)
+	void ServerSpawnWorldItem(class UItemDataAsset* ItemData, int32 Quantity, FVector Location);
+
+	UFUNCTION(Server, Reliable)
+	void ServerTryDropEquipped();
+
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 private:
 	void UpdateCameraDynamics(float DeltaTime);
 	void UpdateDeathCamera(float DeltaTime);
 	void UpdateRotationMode();
+	
+	// 소음(발소리) 발생 관련 로직
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	class UPawnNoiseEmitterComponent* NoiseEmitterComponent;
+	
+	float FootstepNoiseTimer = 0.f;
+	void UpdateFootstepNoise(float DeltaTime);
 	
 	// 사망 시 관전 카메라 이동 처리
 	void HandleDeathCameraInput(FVector MoveDirection, float Value);
@@ -226,8 +248,11 @@ private:
 	UPROPERTY(Replicated) // [Network] 절대 조준 Yaw 값 (For Stable IK)
 	float NetAimYaw; 
 
-	UPROPERTY(Replicated) // [Network] 절대 조준 Yaw 값 (For Stable IK)
-	float NetAimYaw; 
+	UPROPERTY()
+	class AWorldItemActor* OverlappingWorldItem = nullptr; //겹쳐진 월드 아이템 액터
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Inventory", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<class UInventoryComponent> InventoryComponent; //인벤토리 컴포넌트
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Inventory", meta = (AllowPrivateAccess = "true"))
 	float EquipHoldThreshhold = 0.30f; //E를 이 시간 이상 누르면 인벤토리 저장
